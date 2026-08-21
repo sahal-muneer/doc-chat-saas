@@ -1,0 +1,62 @@
+# Local development services. Only Postgres for now (the ingestion pipeline
+# needs somewhere to persist Chunks); Redis will be added here too once the
+# Celery-based background-job epic starts, per CLAUDE.md's tech stack.
+#
+# WHY DOCKER FOR THIS, RATHER THAN INSTALLING POSTGRES DIRECTLY ON THE
+# MACHINE: two reasons. First, isolation — Postgres (and the exact pgvector
+# extension version) lives entirely inside a container, so it can't
+# conflict with any other Postgres install on this machine, and it's fully
+# removable with one command (`docker compose down -v`) with zero leftover
+# system state. Second, and more specific to this project: pgvector isn't
+# built into stock Postgres — it's a separate extension that normally needs
+# to be compiled and installed into the Postgres server itself. Doing that
+# by hand is real, fiddly setup work. The `pgvector/pgvector` image below is
+# an official image that ships Postgres with pgvector ALREADY compiled in,
+# so "docker compose up" is the entire installation step.
+services:
+  postgres:
+    # The tag encodes both the Postgres major version (16) and confirms
+    # pgvector is baked in. Pinning a specific version (rather than
+    # `:latest`) means this file keeps working the same way months from
+    # now, even if a newer image later changes something.
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      # Local development credentials only — deliberately simple. This is
+      # NOT how you'd configure a production database (those secrets would
+      # come from a secrets manager, not a plaintext file checked into git).
+      # Flagging that explicitly so it's a conscious choice, not an
+      # accident that ships to production.
+      POSTGRES_USER: docchat
+      POSTGRES_PASSWORD: docchat_dev_password
+      POSTGRES_DB: docchat
+    ports:
+      # host:container — lets you (or any Python code, or a `psql` client)
+      # connect to localhost:5432 exactly as if Postgres were installed
+      # directly on the machine.
+      - "5432:5432"
+    volumes:
+      # Without a named volume, all data would live INSIDE the container's
+      # writable layer and vanish the moment the container is removed
+      # (`docker compose down` without `-v` still keeps this volume,
+      # though — only `-v` deletes it). A named volume persists on the
+      # host's disk, independent of the container's lifecycle, so stopping
+      # and restarting the container (or rebuilding the image) doesn't
+      # wipe out every document you've ingested during development.
+      - docchat_postgres_data:/var/lib/postgresql/data
+
+  redis:
+    # The message broker between the FastAPI web process and the Celery
+    # worker process — see app/worker/celery_app.py for the full
+    # explanation of what that split actually buys us. Redis itself needs
+    # almost no configuration for this use case: it's just holding small
+    # "please process this document" messages briefly until a worker picks
+    # them up, not being used as a real cache or persistent data store, so
+    # the stock image with no custom config is genuinely enough here.
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+volumes:
+  docchat_postgres_data:

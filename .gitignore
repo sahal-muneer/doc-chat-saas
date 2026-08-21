@@ -1,0 +1,17 @@
+# Backend (Python / FastAPI)
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/uploads/
+*.pyc
+
+# Frontend (Next.js) — frontend/.gitignore already covers node_modules,
+# .next/, etc. for anything created inside frontend/ itself.
+
+# Local editor / tooling config — machine-specific, not project source.
+.idea/
+.mcp.json
+.claude/
+
+# OS cruft
+.DS_Store

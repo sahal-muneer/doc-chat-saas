@@ -1,0 +1,111 @@
+# Ingestion pipeline dependencies (backend/app/ingestion/).
+#
+# PyMuPDF: PDF text extraction (parser.py). Compiled C library, fully local
+# at runtime — safe for the "zero external API calls" constraint. See the
+# AGPL-3.0 licensing note in parser.py's module docstring before shipping
+# this to a closed-source production build.
+PyMuPDF
+
+# python-docx: Word (.docx) text extraction (parser.py). Local XML parsing
+# via lxml, no network access.
+python-docx
+
+# tiktoken: token-aware chunk sizing (chunker.py). NOTE: chunker.py already
+# handles this import failing (falls back to a character-based estimate),
+# and flags in its own docstring that tiktoken's encoding table downloads
+# from an OpenAI-hosted URL on FIRST USE — a real conflict with the "100%
+# offline" requirement in CLAUDE.md. Installing it here is fine (pip install
+# itself doesn't violate the runtime constraint); the open decision is
+# whether to pre-bundle its cached encoding file into the deployment image,
+# or replace it with a tokenizer that ships its vocabulary locally (e.g.
+# the HuggingFace tokenizer for whatever embedding/LLM model gets deployed).
+tiktoken
+
+# sentence-transformers: runs the BAAI/bge-m3 embedding model locally
+# (embedder.py). Pulls in PyTorch as a dependency — this is a much bigger
+# install than anything above (several hundred MB to ~2GB depending on
+# platform, since it installs a full deep-learning framework, not just a
+# small library). NOTE, same shape as the tiktoken flag above: the model
+# WEIGHTS themselves (~2GB for bge-m3) are a separate download, fetched
+# from Hugging Face the first time the model is actually loaded at
+# runtime — not at `pip install` time. See embedder.py's module docstring
+# for the full offline-deployment implication of that.
+sentence-transformers
+
+# Database dependencies (backend/app/db/, backend/app/ingestion/store.py).
+#
+# SQLAlchemy: the ORM used to define documents/document_chunks as Python
+# classes (models.py) instead of hand-written SQL. See database.py's
+# module docstring for the "why an ORM, not raw SQL" trade-off.
+SQLAlchemy
+
+# psycopg[binary]: the actual driver SQLAlchemy uses to talk to Postgres
+# over the network — SQLAlchemy generates SQL, but something still has to
+# open the TCP connection and speak Postgres's wire protocol; that's this.
+# psycopg (v3, not the older psycopg2) is the current-generation driver.
+# [binary] pulls in a precompiled version so installing it doesn't require
+# a C compiler / Postgres dev headers on this machine.
+psycopg[binary]
+
+# pgvector: NOT the Postgres extension itself (that's installed inside the
+# Docker image directly, see docker-compose.yml) — this is the Python
+# package that teaches SQLAlchemy how to read/write Postgres's `vector`
+# column type, via the pgvector.sqlalchemy.Vector class used in models.py.
+# Without this, SQLAlchemy would have no idea what to do with a Python
+# list[float] when trying to write it into a vector-typed column.
+pgvector
+
+# Web framework (backend/app/main.py, backend/app/api/).
+#
+# fastapi: the actual web framework — turns Python functions into HTTP
+# endpoints (see api/documents.py).
+fastapi
+
+# uvicorn: the ASGI SERVER that actually runs a FastAPI app. FastAPI itself
+# only defines what your endpoints do — something still has to listen on a
+# real network port, accept incoming HTTP connections, and hand each
+# request to FastAPI. uvicorn is that program; [standard] pulls in a
+# faster event loop implementation.
+uvicorn[standard]
+
+# python-multipart: required by FastAPI to parse file uploads
+# (`UploadFile` in api/documents.py). Without it, the /documents/upload
+# endpoint fails at runtime with an error about multipart parsing, even
+# though nothing about that error mentions this package by name — worth
+# knowing in advance rather than discovering via a confusing stack trace.
+python-multipart
+
+# Auth dependencies (backend/app/auth/).
+#
+# argon2-cffi: password hashing (security.py). CLAUDE.md's chosen algorithm
+# for the MVP auth system — see security.py's module docstring for why
+# Argon2 specifically, not a faster general-purpose hash.
+argon2-cffi
+
+# pyjwt: creates and verifies the signed JWTs issued at login and checked
+# on every protected request afterward. See security.py for the full
+# "why JWTs make auth stateless" explanation.
+pyjwt
+
+# RAG / generation dependencies (backend/app/rag/).
+#
+# requests: generator.py uses this to call Ollama's local HTTP API
+# (localhost:11434) to run Qwen2.5. It was already present as a transitive
+# dependency of something else above, but pinning it here explicitly means
+# it won't silently disappear if that other package's own dependencies ever
+# change — generator.py depends on it directly, so requirements.txt should
+# say so directly.
+requests
+
+# Background job dependencies (backend/app/worker/).
+#
+# celery: runs document ingestion in a SEPARATE process from the FastAPI
+# web server, so POST /documents/upload can respond immediately instead of
+# blocking the whole request on parsing/chunking/embedding. See
+# app/worker/celery_app.py for the full explanation.
+celery
+
+# redis: the Python client Celery uses to talk to the Redis server (which
+# runs in Docker, see docker-compose.yml) — the actual message broker
+# between the web process and the worker process.
+redis

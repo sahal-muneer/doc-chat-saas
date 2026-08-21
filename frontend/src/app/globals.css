@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+/* A single, deliberate light theme — no @media (prefers-color-scheme:
+   dark) override. The original Next.js scaffold had one, but it would
+   silently fight this design: a visitor with dark mode on at the OS level
+   would see the background flip to near-black while every component
+   below still assumes a light background, producing broken contrast
+   everywhere rather than a real dark mode. Committing to one theme now is
+   more honest than a half-implemented "supports dark mode" that isn't
+   actually designed for it — a real dark mode is a deliberate follow-up,
+   not a free side effect of a media query. */
+:root {
+  --background: #fafafa;
+  --foreground: #18181b;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+}
+
+/* Tailwind's core utilities don't include entrance animations (that's a
+   separate plugin, tailwindcss-animate, not installed here) — this is a
+   small hand-written keyframe instead, applied via the .animate-rise
+   class below. Kept deliberately subtle (8px of movement, 200ms) — the
+   goal is a message feeling like it just arrived, not a flashy effect
+   that draws attention to itself on every single message. */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-rise {
+  animation: rise-in 200ms ease-out;
+}
