@@ -26,9 +26,10 @@ import logging
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 
 from app.auth.dependencies import get_current_user_id
+from app.core.rate_limit import limiter
 from app.ingestion.store import (
     create_document,
     delete_document,
@@ -74,8 +75,9 @@ def get_documents(user_id: str = Depends(get_current_user_id)) -> list[dict]:
 
 
 @router.post("/upload")
+@limiter.limit("10/minute")
 async def upload_document(
-    file: UploadFile, user_id: str = Depends(get_current_user_id)
+    request: Request, file: UploadFile, user_id: str = Depends(get_current_user_id)
 ) -> dict:
     """
     Accept an uploaded PDF/DOCX file, save it, and QUEUE it for background
@@ -84,6 +86,15 @@ async def upload_document(
     worker (app/worker/tasks.py). Requires login — user_id (from the
     verified JWT) is stamped onto the new document immediately, at
     creation, so it has a real owner from the very first row written.
+
+    RATE-LIMITED, 10/minute PER USER: each upload writes a file to disk and
+    queues a real Celery job — cheap for one document, but nothing
+    currently stops a user (or a bug in a script hitting this endpoint) from
+    queueing hundreds of jobs in seconds and backing up the worker for
+    everyone. `request: Request` here is unused directly in this function's
+    body — it exists purely so the @limiter.limit decorator above can find
+    the raw HTTP request it needs to identify the caller (see
+    rate_limit.py).
     """
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:

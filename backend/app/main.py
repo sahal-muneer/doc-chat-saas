@@ -15,15 +15,18 @@ this file is what actually assembles them into one running app.
 import logging
 
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import text
 
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
 from app.core.logging import setup_logging
+from app.core.rate_limit import limiter
 from app.db.database import engine
 from app.ingestion.store import create_tables
 
@@ -53,6 +56,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Registers the limiter on the app (app.state.limiter is where every
+# @limiter.limit(...) decorator, in auth.py/chat.py/documents.py, looks for
+# it), attaches X-RateLimit-* headers to responses via the middleware, and
+# converts a blocked request into an actual HTTP response instead of an
+# unhandled exception.
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+
+@app.exception_handler(RateLimitExceeded)
+def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    """
+    A CUSTOM handler, not slowapi's default one — deliberately, so a
+    blocked request's error body looks exactly like every other error in
+    this API: {"detail": "..."}. Every existing frontend error-handling
+    call (e.g. page.tsx's `data.detail ?? "..."`) already knows how to read
+    that shape; using slowapi's own default response shape instead would
+    have meant either a silent, confusing fallback message on the frontend
+    for this one specific error, or a special case added just to handle
+    it. Matching the existing convention costs nothing and needs zero
+    frontend changes.
+    """
+    return JSONResponse(
+        status_code=429,
+        content={"detail": f"Too many requests ({exc.detail}). Please slow down and try again shortly."},
+    )
 
 # Make sure the database schema exists before the app starts accepting
 # requests. This is the same create_tables() we already tested manually —

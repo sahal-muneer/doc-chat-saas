@@ -123,13 +123,29 @@ def _flag_suspicious_chunks(chunks: list[RetrievedChunk], document_id: str | Non
                 break
 
 
-def build_messages(chunks: list[RetrievedChunk], question: str) -> list[dict]:
+def build_messages(
+    chunks: list[RetrievedChunk], question: str, history: list[dict] | None = None
+) -> list[dict]:
     """
     Turn retrieved chunks + a question into a list of role-tagged messages
     for Ollama's /api/chat — replaces the old build_prompt(), which
     returned one flat string for /api/generate. See the module docstring's
     "WHY /api/chat" section for why the role split itself is the main
     defensive change here.
+
+    WHERE `history` FITS IN — CONVERSATIONAL MEMORY: `history` is prior
+    turns of this conversation (oldest-first [{"role", "content"}, ...],
+    the exact shape app/rag/history.get_messages() returns), inserted
+    BETWEEN the system message and the current turn's excerpts+question.
+    That ordering matters: it puts the grounding instructions first (so
+    they apply to everything that follows, including how to read the
+    history), then the natural back-and-forth of the conversation so far,
+    then the current question LAST — the position a chat model expects to
+    find "the thing I'm actually being asked to respond to right now."
+    History carries only plain text (what was asked, what was answered) —
+    never the excerpts a past turn used, which keeps every prompt's size
+    governed by how much history is included, not by how many chunks every
+    past turn happened to retrieve.
 
     WHY <excerpts> TAGS, NOT JUST "[Excerpt 1]" LABELS: XML-style tags are
     a stronger structural signal than a plain text label — many
@@ -148,6 +164,10 @@ def build_messages(chunks: list[RetrievedChunk], question: str) -> list[dict]:
     before the moment it matters most, rather than trusting one
     far-earlier mention to still be "top of mind."
     """
+    history_messages = [
+        {"role": m["role"], "content": m["content"]} for m in (history or [])
+    ]
+
     if not chunks:
         # No relevant chunks at all — don't even bother asking the model to
         # "use the excerpts below" when there are none. Being explicit
@@ -163,6 +183,7 @@ def build_messages(chunks: list[RetrievedChunk], question: str) -> list[dict]:
                     "their question."
                 ),
             },
+            *history_messages,
             {"role": "user", "content": f"Question: {question}"},
         ]
 
@@ -193,11 +214,14 @@ def build_messages(chunks: list[RetrievedChunk], question: str) -> list[dict]:
 
     return [
         {"role": "system", "content": system_message},
+        *history_messages,
         {"role": "user", "content": user_message},
     ]
 
 
-def generate_answer(chunks: list[RetrievedChunk], question: str) -> str:
+def generate_answer(
+    chunks: list[RetrievedChunk], question: str, history: list[dict] | None = None
+) -> str:
     """
     Build the messages, send them to Qwen2.5 via Ollama's /api/chat, and
     return the generated answer as plain text.
@@ -211,7 +235,7 @@ def generate_answer(chunks: list[RetrievedChunk], question: str) -> str:
     answer is simpler to write and test than handling a stream.
     """
     _flag_suspicious_chunks(chunks)
-    messages = build_messages(chunks, question)
+    messages = build_messages(chunks, question, history)
 
     response = requests.post(
         OLLAMA_URL,
@@ -230,7 +254,9 @@ def generate_answer(chunks: list[RetrievedChunk], question: str) -> str:
     return response.json()["message"]["content"]
 
 
-def stream_answer(chunks: list[RetrievedChunk], question: str):
+def stream_answer(
+    chunks: list[RetrievedChunk], question: str, history: list[dict] | None = None
+):
     """
     Same idea as generate_answer(), but a GENERATOR (uses `yield`, not
     `return`) that produces the answer piece by piece, as Ollama itself
@@ -255,7 +281,7 @@ def stream_answer(chunks: list[RetrievedChunk], question: str):
     connection to fully close first.
     """
     _flag_suspicious_chunks(chunks)
-    messages = build_messages(chunks, question)
+    messages = build_messages(chunks, question, history)
 
     response = requests.post(
         OLLAMA_URL,

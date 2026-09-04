@@ -1,0 +1,27 @@
+# Development-only dependencies — things needed to WORK ON this project
+# (running its test suite), not things needed to RUN it in production. Kept
+# separate from requirements.txt on purpose: a real deployment installs
+# only requirements.txt, so it never pulls in test tooling it will never
+# use. `-r requirements.txt` below means "install everything from the main
+# file too" — this file is additive, not a replacement for it.
+-r requirements.txt
+
+# pytest: the actual test runner — discovers every test_*.py file and every
+# function named test_*() inside them, runs each one, and reports
+# pass/fail. The standard choice for Python; nothing else comes close to
+# its ecosystem for this project's needs (fixtures, in particular — see
+# tests/conftest.py).
+pytest
+
+# pytest-mock: a thin pytest wrapper around Python's built-in
+# unittest.mock, exposed as a fixture (`mocker`) instead of needing manual
+# patch()/unpatch() bookkeeping in every test. Used in tests/test_generator.py
+# and tests/test_condenser.py to replace the real network call to Ollama
+# with a fake, controlled response — see those files for why that's the
+# right thing to mock, and what wouldn't be.
+pytest-mock
+
+# httpx: FastAPI's TestClient (used in tests/test_api_auth.py to call real
+# routes without a running server) is built on httpx under the hood.
+# FastAPI doesn't install it by default, so it has to be listed explicitly.
+httpx

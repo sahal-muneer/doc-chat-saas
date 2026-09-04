@@ -159,6 +159,28 @@ export default function Home() {
     setDocuments(data);
   }
 
+  // Loads whatever was already said in this document's conversation —
+  // the frontend counterpart to the backend now persisting every turn
+  // (see api/chat.py's save_message calls). Without this, the server
+  // would remember a conversation but the UI would show a blank chat
+  // window on every page refresh or re-selection, which would make the
+  // persistence invisible and pointless.
+  async function fetchHistory(documentId: string) {
+    try {
+      const response = await fetch(`${API_URL}/chat/${documentId}/history`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) return;
+      const data: { role: "user" | "assistant"; content: string }[] =
+        await response.json();
+      setMessages(data.map((m) => ({ role: m.role, text: m.content })));
+    } catch {
+      // Best-effort: the conversation still exists server-side either way —
+      // a failed load here just means an empty-looking chat window until
+      // the next successful fetch, not lost data.
+    }
+  }
+
   // Runs once a token actually exists (either just logged in, or restored
   // from localStorage above) — this is what actually fetches the "which
   // documents can I see" list, now correctly scoped to whoever is logged
@@ -508,6 +530,7 @@ export default function Home() {
                   onClick={() => {
                     setSelectedDocumentId(doc.document_id);
                     setMessages([]);
+                    fetchHistory(doc.document_id);
                   }}
                   className={`flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
                     isSelected

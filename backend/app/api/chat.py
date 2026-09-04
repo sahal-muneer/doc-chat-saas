@@ -21,18 +21,31 @@ bad generation (right chunks, but a bad answer built from them).
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.auth.dependencies import get_current_user_id
+from app.core.rate_limit import limiter
 from app.ingestion.store import get_document_owner
+from app.rag.condenser import condense_question
 from app.rag.generator import generate_answer, stream_answer
+from app.rag.history import get_messages, save_message
 from app.rag.retriever import search_chunks
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+# How many PRIOR turns get sent to the model as conversational context, on
+# every request. Capped, not unbounded — see history.py's get_messages()
+# docstring for why: excerpts + history + the question all have to fit in
+# one finite context window, and an ever-growing, never-trimmed history
+# would eventually crowd out the actual grounding data. 6 messages = 3
+# user/assistant pairs — enough for "what about the deadlines mentioned
+# there?" to resolve correctly, without letting a long-running conversation
+# quietly bloat every single request forever.
+HISTORY_LIMIT = 6
 
 
 def _ensure_owner(document_id: str, user_id: str) -> None:
@@ -64,6 +77,23 @@ def _ensure_owner(document_id: str, user_id: str) -> None:
         raise HTTPException(status_code=404, detail="Document not found.")
 
 
+@router.get("/{document_id}/history")
+def get_history(document_id: str, user_id: str = Depends(get_current_user_id)) -> list[dict]:
+    """
+    Return this (document, user)'s ENTIRE past conversation, oldest first —
+    what the frontend calls when a document is selected, so reopening or
+    refreshing the page shows the conversation that was already there
+    instead of a blank chat window. Deliberately no `limit` here (unlike
+    HISTORY_LIMIT's use inside chat()/chat_stream() below): what a HUMAN
+    wants to see scrolling back through a chat is the real, full
+    transcript; what get sent into a PROMPT is a separate, much smaller
+    concern driven by the model's context window, not by what's useful to
+    display.
+    """
+    _ensure_owner(document_id, user_id)
+    return get_messages(document_id, user_id)
+
+
 class SearchRequest(BaseModel):
     """
     FastAPI + Pydantic: declaring the expected shape of the request body as
@@ -83,15 +113,23 @@ class SearchRequest(BaseModel):
 
 
 @router.post("/search")
-def search(request: SearchRequest, user_id: str = Depends(get_current_user_id)) -> list[dict]:
+@limiter.limit("30/minute")
+def search(request: Request, body: SearchRequest, user_id: str = Depends(get_current_user_id)) -> list[dict]:
     """
     Retrieval only — no LLM involved. Returns the raw chunks that would be
     handed to Qwen2.5 once generation exists, so you can inspect retrieval
     quality on its own. Requires login, and the document must belong to
     the caller (see _ensure_owner above).
+
+    `request: Request` (the raw HTTP request, required for the
+    @limiter.limit decorator above to identify the caller) and `body:
+    SearchRequest` (the parsed JSON body this route actually reads) used to
+    share the name "request" — that collision would have silently broken
+    slowapi's lookup for the real Request object, so the body param is
+    named `body` here and in every other route below.
     """
-    _ensure_owner(request.document_id, user_id)
-    results = search_chunks(request.document_id, request.query, request.top_k)
+    _ensure_owner(body.document_id, user_id)
+    results = search_chunks(body.document_id, body.query, body.top_k)
     return [
         {
             "chunk_index": r.chunk_index,
@@ -105,7 +143,8 @@ def search(request: SearchRequest, user_id: str = Depends(get_current_user_id)) 
 
 
 @router.post("")
-def chat(request: SearchRequest, user_id: str = Depends(get_current_user_id)) -> dict:
+@limiter.limit("15/minute")
+def chat(request: Request, body: SearchRequest, user_id: str = Depends(get_current_user_id)) -> dict:
     """
     The real thing: retrieval AND generation, in one call. Runs
     search_chunks() first, then hands its output straight into
@@ -122,17 +161,36 @@ def chat(request: SearchRequest, user_id: str = Depends(get_current_user_id)) ->
     document" — which is the beginning of real citations, and also the
     fastest way to debug a wrong answer: was retrieval wrong, or did the
     model misread correct chunks?
+
+    RATE-LIMITED LOWER THAN /chat/search (15/minute vs 30/minute): this
+    route, unlike /chat/search, ends in a real Qwen2.5 generation call —
+    genuinely slow and resource-heavy on this hardware, and the actual
+    thing rate limiting on this project exists to protect in the first
+    place. See rate_limit.py's module docstring.
     """
-    _ensure_owner(request.document_id, user_id)
-    # Logging query_len (a number), not request.query itself (the actual
+    _ensure_owner(body.document_id, user_id)
+    # Logging query_len (a number), not body.query itself (the actual
     # text): a user's questions could reasonably contain sensitive
     # information about the document they're asking about — logging isn't
     # a place to casually accumulate that. This still answers the useful
     # operational question ("is anyone sending huge queries?") without
     # capturing content that wasn't meant to be stored twice.
-    logger.info(f"chat: user_id={user_id} document_id={request.document_id} query_len={len(request.query)}")
-    chunks = search_chunks(request.document_id, request.query, request.top_k)
-    answer = generate_answer(chunks, request.query)
+    logger.info(f"chat: user_id={user_id} document_id={body.document_id} query_len={len(body.query)}")
+
+    # Fetched BEFORE this turn's question is saved below — otherwise the
+    # current question would show up twice: once as "the question," once
+    # again inside its own history.
+    history = get_messages(body.document_id, user_id, limit=HISTORY_LIMIT)
+    retrieval_query = condense_question(history, body.query)
+    chunks = search_chunks(body.document_id, retrieval_query, body.top_k)
+
+    save_message(body.document_id, user_id, "user", body.query)
+    # Generation still sees the user's ORIGINAL wording, not the condensed
+    # retrieval query — condense_question()'s rewrite exists purely to make
+    # vector search work; the answer should read like a response to what
+    # was actually typed.
+    answer = generate_answer(chunks, body.query, history)
+    save_message(body.document_id, user_id, "assistant", answer)
 
     return {
         "answer": answer,
@@ -148,8 +206,9 @@ def chat(request: SearchRequest, user_id: str = Depends(get_current_user_id)) ->
 
 
 @router.post("/stream")
+@limiter.limit("15/minute")
 def chat_stream(
-    request: SearchRequest, user_id: str = Depends(get_current_user_id)
+    request: Request, body: SearchRequest, user_id: str = Depends(get_current_user_id)
 ) -> StreamingResponse:
     """
     Same retrieval + generation as POST /chat, but the response starts
@@ -187,13 +246,31 @@ def chat_stream(
     so an unauthorized request gets a clean 404 instead of a stream that
     opens and then has nothing to send.
     """
-    _ensure_owner(request.document_id, user_id)
-    logger.info(f"chat/stream: user_id={user_id} document_id={request.document_id} query_len={len(request.query)}")
-    chunks = search_chunks(request.document_id, request.query, request.top_k)
+    _ensure_owner(body.document_id, user_id)
+    logger.info(f"chat/stream: user_id={user_id} document_id={body.document_id} query_len={len(body.query)}")
+
+    # Same ordering reasoning as POST /chat above: fetch history, condense,
+    # retrieve, THEN save this turn's question — so it isn't double-counted
+    # inside its own history.
+    history = get_messages(body.document_id, user_id, limit=HISTORY_LIMIT)
+    retrieval_query = condense_question(history, body.query)
+    chunks = search_chunks(body.document_id, retrieval_query, body.top_k)
+    save_message(body.document_id, user_id, "user", body.query)
 
     def event_stream():
-        for token in stream_answer(chunks, request.query):
+        # Streaming means the full answer never exists as one string here —
+        # only as a sequence of small pieces yielded to the browser. To
+        # save the complete answer to history once the stream finishes,
+        # every piece has to be collected as it goes by, then joined at the
+        # end — the same "accumulate, don't discard" idea as everywhere
+        # else in this codebase, just applied to an HTTP response instead
+        # of a database write.
+        answer_parts: list[str] = []
+        for token in stream_answer(chunks, body.query, history):
+            answer_parts.append(token)
             yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+
+        save_message(body.document_id, user_id, "assistant", "".join(answer_parts))
 
         sources = [
             {

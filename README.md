@@ -73,8 +73,11 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 ```bash
-celery -A app.worker.celery_app worker --loglevel=info
+celery -A app.worker.celery_app worker --loglevel=info --pool=solo
 ```
+
+`--pool=solo` is required here, on both macOS and Windows — see
+[Troubleshooting](#troubleshooting) below for why.
 
 The database tables are created automatically the first time the
 backend starts — no separate migration step needed.
@@ -98,6 +101,27 @@ npm run dev
 
 Backend API docs (Swagger UI): **http://localhost:8000/docs**
 
+## Running tests
+
+The backend has an automated test suite (pytest) covering password
+hashing/JWTs, the document chunking algorithm, prompt construction and
+conversation-history handling (with the Ollama calls mocked out — see
+`backend/tests/` for why), and a real end-to-end signup/login flow against
+a test database. It needs Postgres and Redis running (the same
+`docker compose up -d` from step 1), but not Ollama, the Celery worker, or
+the frontend.
+
+```bash
+cd backend
+source .venv/bin/activate
+pip install -r requirements-dev.txt   # one-time — test-only dependencies
+python -m pytest tests/ -v
+```
+
+Tests run against a separate `docchat_test` database and a separate Redis
+index, created and cleaned up automatically — they never touch your real
+`docchat` data.
+
 ## Verifying it's really offline
 
 Everything above works with your internet connection fully disabled,
@@ -116,6 +140,22 @@ step at runtime that calls out to any external service.
 - **A document stays stuck on `pending`** — the Celery worker (step 4,
   second terminal) isn't running. Uploaded files are only processed
   while it's alive.
+- **Celery worker crashes immediately on every upload** (`SIGABRT` /
+  `WorkerLostError`, or on Windows `PermissionError: [WinError 5] Access is
+  denied`) — this is why `--pool=solo` is required in the command above.
+  Celery's default worker mode (`prefork`) creates worker processes by
+  forking the running process, and that mechanism is broken on both
+  platforms we've tested this on, for two different underlying reasons:
+  Windows can't emulate Unix's `fork()` at all, and on macOS, PyTorch's
+  check for Apple's Metal GPU (used by the embedding model) touches Apple's
+  Objective-C runtime — which macOS refuses to safely initialize inside a
+  freshly forked child process, and aborts on purpose rather than risk
+  memory corruption (you'll see `objc[...]: ...may have been in progress in
+  another thread when fork() was called... Crashing instead.` in the logs
+  if this is what's happening). `--pool=solo` runs the worker as a single
+  process with no forking at all, which sidesteps both problems
+  structurally. The cost is no parallel task processing — a non-issue for
+  local development, where documents are processed one at a time anyway.
 - **CORS errors in the browser console** — the backend only allows
   requests from `http://localhost:3000` by default (see `main.py`). If
   you're running the frontend on a different port, that'll need

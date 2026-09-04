@@ -118,6 +118,13 @@ class Document(Base):
         back_populates="document", cascade="all, delete-orphan"
     )
 
+    # Same cascade reasoning as `chunks` above — deleting a Document should
+    # take its chat history with it too, not leave orphaned messages
+    # pointing at a document that no longer exists.
+    messages: Mapped[list["Message"]] = relationship(
+        cascade="all, delete-orphan"
+    )
+
 
 class DocumentChunk(Base):
     """
@@ -148,3 +155,38 @@ class DocumentChunk(Base):
     )
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
+
+
+class Message(Base):
+    """
+    One turn of a chat conversation — either the user's question or the
+    model's answer. Deliberately scoped to (document_id, user_id) rather
+    than a separate `conversations` table: the current product only ever
+    has ONE chat thread per document per user (select a document, chat with
+    it), so a dedicated conversation entity would be structure nobody asked
+    for yet. If "multiple named conversations per document" ever becomes a
+    real feature, that's the point to introduce one — not before.
+
+    WHY THIS TABLE EXISTS AT ALL (conversational memory): without it, every
+    /chat request is stateless — the model has no idea what was asked a
+    moment ago, so "what about the second one?" means nothing to it. See
+    app/rag/history.py for how these rows get turned into actual prompt
+    context.
+    """
+
+    __tablename__ = "messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+    # "user" or "assistant" — matches the same role vocabulary Ollama's
+    # /api/chat already speaks (see generator.py's build_messages()), so a
+    # stored row can be turned directly into a prompt message with no
+    # translation step.
+    role: Mapped[str] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(timezone.utc)
+    )

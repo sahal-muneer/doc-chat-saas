@@ -109,3 +109,12 @@ celery
 # runs in Docker, see docker-compose.yml) — the actual message broker
 # between the web process and the worker process.
 redis
+
+# Rate limiting dependency (backend/app/core/rate_limit.py).
+#
+# slowapi: a FastAPI-oriented wrapper around the `limits` library — caps
+# how many requests a given caller can make per time window (e.g. "5 login
+# attempts per minute"), rejecting the rest with 429 instead of serving
+# them. See rate_limit.py's module docstring for why a library, and why
+# Redis-backed, not slowapi's default in-memory counters.
+slowapi
